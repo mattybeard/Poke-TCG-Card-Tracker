@@ -2,15 +2,12 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createWorker } from 'tesseract.js';
 
-// OCR interval in ms
-const SCAN_INTERVAL = 1000;
-
 export default function ScanPage() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const previewCanvasRef = useRef(null);
   const workerRef = useRef(null);
-  const scanTimerRef = useRef(null);
   const streamRef = useRef(null);
 
   const [status, setStatus] = useState('starting');
@@ -18,10 +15,10 @@ export default function ScanPage() {
   const [ocrHistory, setOcrHistory] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [torchOn, setTorchOn] = useState(false);
-  const [cropPct, setCropPct] = useState(15); // % of frame height to crop from bottom
+  const [cropPct, setCropPct] = useState(20);
+  const [processing, setProcessing] = useState(false);
 
-  const stopScan = useCallback(() => {
-    clearInterval(scanTimerRef.current);
+  const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -32,40 +29,70 @@ export default function ScanPage() {
     }
   }, []);
 
-  const doScan = useCallback(async () => {
+  // Capture a single high-res frame and OCR it
+  const captureAndRecognize = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    const preview = previewCanvasRef.current;
     const worker = workerRef.current;
     if (!video || !canvas || !worker || video.readyState < 2) return;
+    if (processing) return;
+
+    setProcessing(true);
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    if (!vw || !vh) return;
+    if (!vw || !vh) { setProcessing(false); return; }
 
+    // Crop bottom N% of the frame
     const cropH = Math.floor(vh * (cropPct / 100));
     const cropY = vh - cropH;
-    const scale = 3;
+
+    // Draw at full resolution (no scaling down, but upscale small frames)
+    const scale = vw < 1000 ? 3 : 2;
     canvas.width = vw * scale;
     canvas.height = cropH * scale;
     const ctx = canvas.getContext('2d');
 
-    ctx.filter = 'grayscale(1) contrast(2.0) brightness(1.1)';
+    // Draw WITHOUT filters first — raw capture
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw * scale, cropH * scale);
-    ctx.filter = 'none';
+    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, canvas.width, canvas.height);
+
+    // Manual pixel-level processing for reliable cross-browser greyscale + contrast
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      // Convert to greyscale
+      let grey = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      // Apply contrast (factor 2.0 around midpoint 128)
+      grey = ((grey - 128) * 2.0) + 128;
+      // Clamp
+      grey = grey < 0 ? 0 : grey > 255 ? 255 : grey;
+      d[i] = d[i + 1] = d[i + 2] = grey;
+    }
+    ctx.putImageData(imageData, 0, 0);
+
+    // Show the processed image so user can see what Tesseract receives
+    if (preview) {
+      preview.width = canvas.width;
+      preview.height = canvas.height;
+      preview.getContext('2d').drawImage(canvas, 0, 0);
+    }
 
     try {
       const { data: { text } } = await worker.recognize(canvas);
       const trimmed = text.trim();
       setOcrText(trimmed);
       if (trimmed) {
-        setOcrHistory((prev) => [trimmed, ...prev].slice(0, 10));
+        setOcrHistory((prev) => [trimmed, ...prev].slice(0, 15));
       }
-    } catch {
-      // transient error — keep scanning
+    } catch (err) {
+      setOcrText(`Error: ${err.message}`);
     }
-  }, [cropPct]);
+
+    setProcessing(false);
+  }, [cropPct, processing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,7 +100,11 @@ export default function ScanPage() {
     async function init() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -85,14 +116,14 @@ export default function ScanPage() {
 
         const worker = await createWorker('eng', 1, { logger: () => {} });
         if (cancelled) { worker.terminate(); return; }
+        // PSM 6 = uniform block of text — more forgiving than PSM 7 (single line)
+        // NO character whitelist — let Tesseract read everything so we can debug
         await worker.setParameters({
-          tessedit_pageseg_mode: '7',
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/ ',
+          tessedit_pageseg_mode: '6',
         });
         workerRef.current = worker;
 
         setStatus('scanning');
-        scanTimerRef.current = setInterval(doScan, SCAN_INTERVAL);
       } catch (err) {
         if (cancelled) return;
         if (err.name === 'NotAllowedError') setStatus('permission-denied');
@@ -101,15 +132,8 @@ export default function ScanPage() {
     }
 
     init();
-    return () => { cancelled = true; stopScan(); };
-  }, [doScan, stopScan]);
-
-  // Restart scanner when cropPct changes
-  useEffect(() => {
-    if (status !== 'scanning') return;
-    clearInterval(scanTimerRef.current);
-    scanTimerRef.current = setInterval(doScan, SCAN_INTERVAL);
-  }, [cropPct, doScan, status]);
+    return () => { cancelled = true; stopCamera(); };
+  }, [stopCamera]);
 
   const toggleTorch = async () => {
     const track = streamRef.current?.getVideoTracks()[0];
@@ -123,7 +147,7 @@ export default function ScanPage() {
   return (
     <div className="scan-page">
       <div className="scan-header">
-        <button className="back-btn" onClick={() => { stopScan(); navigate(-1); }}>← Back</button>
+        <button className="back-btn" onClick={() => { stopCamera(); navigate(-1); }}>← Back</button>
         <h2 className="scan-title">📷 OCR Test</h2>
         <button className="scan-torch-btn" onClick={toggleTorch} title="Toggle torch">
           {torchOn ? '🔦' : '💡'}
@@ -139,54 +163,89 @@ export default function ScanPage() {
             <span className="scan-guide-corner bl" />
             <span className="scan-guide-corner br" />
           </div>
-          <div className="scan-guide-label">Point at bottom of card</div>
+          <div className="scan-guide-label">Tap Capture to scan text</div>
         </div>
-        {status === 'scanning' && <div className="scan-badge scanning">🔍 Scanning…</div>}
         {status === 'starting' && <div className="scan-badge">⏳ Starting…</div>}
       </div>
 
+      {/* Hidden working canvas */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       {status === 'permission-denied' && (
         <div className="scan-result-panel error">
           <div className="scan-result-icon">🚫</div>
-          <div className="scan-result-msg">Camera access denied. Allow camera access in browser settings.</div>
+          <div className="scan-result-msg">Camera access denied.</div>
         </div>
       )}
 
       {status === 'error' && (
         <div className="scan-result-panel error">
           <div className="scan-result-icon">⚠️</div>
-          <div className="scan-result-msg">{errorMsg || 'Something went wrong.'}</div>
+          <div className="scan-result-msg">{errorMsg}</div>
         </div>
       )}
 
       {status === 'scanning' && (
         <div style={{ padding: '12px 16px' }}>
+          {/* Capture button */}
+          <button
+            onClick={captureAndRecognize}
+            disabled={processing}
+            style={{
+              width: '100%', padding: '14px', fontSize: 17, fontWeight: 600,
+              background: processing ? '#444' : '#4f8cff', color: '#fff',
+              border: 'none', borderRadius: 10, cursor: processing ? 'wait' : 'pointer',
+              marginBottom: 12,
+            }}
+          >
+            {processing ? '⏳ Processing…' : '📸 Capture & Read'}
+          </button>
+
+          {/* Crop slider */}
           <div style={{ marginBottom: 10 }}>
             <label style={{ fontSize: 13, color: '#aaa' }}>
-              Crop height: bottom <strong>{cropPct}%</strong> of frame
+              Crop: bottom <strong>{cropPct}%</strong> of frame
             </label>
             <input
-              type="range" min={5} max={40} value={cropPct}
+              type="range" min={5} max={50} value={cropPct}
               onChange={(e) => setCropPct(Number(e.target.value))}
               style={{ width: '100%', marginTop: 4 }}
             />
           </div>
 
+          {/* Show the processed image Tesseract actually sees */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>What Tesseract sees:</div>
+            <canvas
+              ref={previewCanvasRef}
+              style={{
+                width: '100%', height: 'auto', borderRadius: 6,
+                border: '1px solid #333', background: '#000',
+              }}
+            />
+          </div>
+
+          {/* Latest read */}
           <div style={{ background: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Latest OCR read:</div>
-            <div style={{ fontSize: 15, color: '#e0e0e0', fontFamily: 'monospace', minHeight: 22, wordBreak: 'break-all' }}>
-              {ocrText || <span style={{ color: '#555' }}>(nothing yet)</span>}
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Latest OCR result:</div>
+            <div style={{
+              fontSize: 15, color: '#e0e0e0', fontFamily: 'monospace',
+              minHeight: 22, wordBreak: 'break-all', whiteSpace: 'pre-wrap',
+            }}>
+              {ocrText || <span style={{ color: '#555' }}>(tap Capture to start)</span>}
             </div>
           </div>
 
+          {/* History */}
           {ocrHistory.length > 0 && (
             <div style={{ background: '#111', borderRadius: 8, padding: 10 }}>
-              <div style={{ fontSize: 11, color: '#888', marginBottom: 6 }}>Last 10 reads:</div>
+              <div style={{ fontSize: 11, color: '#888', marginBottom: 6 }}>Previous reads:</div>
               {ocrHistory.map((t, i) => (
-                <div key={i} style={{ fontSize: 13, color: i === 0 ? '#fff' : '#666', fontFamily: 'monospace', marginBottom: 3, wordBreak: 'break-all' }}>
-                  {t || '—'}
+                <div key={i} style={{
+                  fontSize: 12, color: i === 0 ? '#fff' : '#666',
+                  fontFamily: 'monospace', marginBottom: 3, wordBreak: 'break-all',
+                }}>
+                  {t}
                 </div>
               ))}
             </div>
