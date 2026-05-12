@@ -4,11 +4,62 @@ import { useNavigate } from 'react-router-dom';
 const OCR_API_URL = 'https://api.ocr.space/parse/image';
 const OCR_API_KEY = import.meta.env.VITE_OCR_SPACE_KEY;
 
+/**
+ * Map a rectangle from display-space (pixels on screen) back to video-frame
+ * pixel coordinates, accounting for object-fit: cover scaling/cropping.
+ */
+function displayRectToVideoRect(videoEl, displayRect) {
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  const elRect = videoEl.getBoundingClientRect();
+  const dw = elRect.width;
+  const dh = elRect.height;
+
+  // object-fit: cover — the video is scaled up uniformly so it fills the
+  // element, then excess is centred-cropped.
+  const videoAspect = vw / vh;
+  const displayAspect = dw / dh;
+
+  let scale, offsetX, offsetY;
+  if (videoAspect > displayAspect) {
+    // Video wider than display — left/right cropped
+    scale = dh / vh;            // display px per video px
+    offsetX = (vw * scale - dw) / 2; // display px hidden on each side
+    offsetY = 0;
+  } else {
+    // Video taller than display — top/bottom cropped
+    scale = dw / vw;
+    offsetX = 0;
+    offsetY = (vh * scale - dh) / 2;
+  }
+
+  // Position of the target rect relative to the video element's top-left
+  const relLeft   = displayRect.left   - elRect.left;
+  const relTop    = displayRect.top    - elRect.top;
+  const relRight  = displayRect.right  - elRect.left;
+  const relBottom = displayRect.bottom - elRect.top;
+
+  // Map back to video-frame coordinates
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const srcLeft   = clamp((relLeft   + offsetX) / scale, 0, vw);
+  const srcTop    = clamp((relTop    + offsetY) / scale, 0, vh);
+  const srcRight  = clamp((relRight  + offsetX) / scale, 0, vw);
+  const srcBottom = clamp((relBottom + offsetY) / scale, 0, vh);
+
+  return {
+    x: srcLeft,
+    y: srcTop,
+    w: srcRight  - srcLeft,
+    h: srcBottom - srcTop,
+  };
+}
+
 export default function ScanPage() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
+  const guideBoxRef = useRef(null);
   const streamRef = useRef(null);
 
   const [status, setStatus] = useState('starting');
@@ -16,7 +67,6 @@ export default function ScanPage() {
   const [ocrHistory, setOcrHistory] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [torchOn, setTorchOn] = useState(false);
-  const [cropPct, setCropPct] = useState(20);
   const [processing, setProcessing] = useState(false);
 
   const stopCamera = useCallback(() => {
@@ -30,7 +80,8 @@ export default function ScanPage() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const preview = previewCanvasRef.current;
-    if (!video || !canvas || video.readyState < 2) return;
+    const guideBox = guideBoxRef.current;
+    if (!video || !canvas || !guideBox || video.readyState < 2) return;
     if (processing) return;
 
     setProcessing(true);
@@ -39,19 +90,18 @@ export default function ScanPage() {
     const vh = video.videoHeight;
     if (!vw || !vh) { setProcessing(false); return; }
 
-    const cropH = Math.floor(vh * (cropPct / 100));
-    const cropY = vh - cropH;
+    // Map the guide box's on-screen position → video frame coordinates
+    const { x, y, w, h } = displayRectToVideoRect(video, guideBox.getBoundingClientRect());
 
-    // Draw cropped region at full resolution
-    canvas.width = vw;
-    canvas.height = cropH;
+    canvas.width  = Math.round(w);
+    canvas.height = Math.round(h);
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw, cropH);
+    ctx.drawImage(video, x, y, w, h, 0, 0, canvas.width, canvas.height);
 
-    // Show preview
+    // Show preview so user can verify the crop is correct
     if (preview) {
-      preview.width = vw;
-      preview.height = cropH;
+      preview.width  = canvas.width;
+      preview.height = canvas.height;
       preview.getContext('2d').drawImage(canvas, 0, 0);
     }
 
@@ -93,7 +143,7 @@ export default function ScanPage() {
     }
 
     setProcessing(false);
-  }, [cropPct, processing]);
+  }, [processing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -153,7 +203,7 @@ export default function ScanPage() {
       <div className="scan-viewport">
         <video ref={videoRef} className="scan-video" playsInline muted />
         <div className="scan-overlay">
-          <div className="scan-guide-box">
+          <div ref={guideBoxRef} className="scan-guide-box">
             <span className="scan-guide-corner tl" />
             <span className="scan-guide-corner tr" />
             <span className="scan-guide-corner bl" />
@@ -196,18 +246,7 @@ export default function ScanPage() {
           </button>
 
           <div style={{ marginBottom: 10 }}>
-            <label style={{ fontSize: 13, color: '#aaa' }}>
-              Crop: bottom <strong>{cropPct}%</strong> of frame
-            </label>
-            <input
-              type="range" min={5} max={60} value={cropPct}
-              onChange={(e) => setCropPct(Number(e.target.value))}
-              style={{ width: '100%', marginTop: 4 }}
-            />
-          </div>
-
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Captured region:</div>
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Captured region (what OCR sees):</div>
             <canvas
               ref={previewCanvasRef}
               style={{
