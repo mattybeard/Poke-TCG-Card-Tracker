@@ -1,59 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createWorker } from 'tesseract.js';
-import { apiFetch } from '../lib/apiFetch.js';
 
-// How many consecutive matching reads before we accept the result
-const CONFIRM_THRESHOLD = 2;
 // OCR interval in ms
-const SCAN_INTERVAL = 700;
-
-// Extract set code (2-5 uppercase letters) and card number from OCR text.
-// Pokemon card bottom-left has the format: ASC 002/217
-// Primary: match SETCODE immediately adjacent to NNN/TTT (most reliable)
-// Fallback: find them separately and pick the closest code to the number.
-function parseCardText(text) {
-  // Normalise: collapse whitespace, uppercase
-  const normalised = text.replace(/\s+/g, ' ').toUpperCase();
-
-  // Primary pattern: set code directly before the number, e.g. "ASC 002/217" or "ASC002/217"
-  // Allows 0-4 spaces/noise chars between the code and the number
-  const primary = normalised.match(/\b([A-Z]{2,5})\s{0,4}(\d{1,3})\/\d{1,3}\b/);
-  if (primary) {
-    return { setCode: primary[1], cardNumber: primary[2] };
-  }
-
-  // Fallback: find the number pattern and the closest uppercase word to it
-  const numMatch = normalised.match(/\b(\d{1,3})\/(\d{1,3})\b/);
-  if (!numMatch) return null;
-  const cardNumber = numMatch[1];
-
-  const STOP_WORDS = new Set([
-    'THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 'ARE', 'WAS',
-    'NOT', 'YOU', 'YOUR', 'ALL', 'HAVE', 'WILL', 'BEEN', 'THEY', 'CAN',
-    'ITS', 'HAS', 'HIT', 'GET', 'HP', 'NO', 'WT', 'HT',
-  ]);
-
-  const codeMatches = [...normalised.matchAll(/\b([A-Z]{2,5})\b/g)];
-  const candidates = codeMatches.filter((m) => !STOP_WORDS.has(m[1]));
-  if (candidates.length === 0) return null;
-
-  const numIdx = normalised.indexOf(numMatch[0]);
-  let bestCode = null;
-  let bestDist = Infinity;
-  for (const m of candidates) {
-    const dist = Math.abs(m.index - numIdx);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestCode = m[1];
-    }
-  }
-
-  // Reject if the best candidate is more than 20 chars away — likely unrelated text
-  if (bestDist > 20) return null;
-
-  return bestCode ? { setCode: bestCode, cardNumber } : null;
-}
+const SCAN_INTERVAL = 1000;
 
 export default function ScanPage() {
   const navigate = useNavigate();
@@ -62,14 +12,13 @@ export default function ScanPage() {
   const workerRef = useRef(null);
   const scanTimerRef = useRef(null);
   const streamRef = useRef(null);
-  const lastMatchRef = useRef(null);
-  const matchCountRef = useRef(0);
 
-  const [status, setStatus] = useState('starting'); // starting | scanning | found | error | permission-denied
+  const [status, setStatus] = useState('starting');
   const [ocrText, setOcrText] = useState('');
-  const [matchPreview, setMatchPreview] = useState(null); // { card, set } from API
+  const [ocrHistory, setOcrHistory] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [torchOn, setTorchOn] = useState(false);
+  const [cropPct, setCropPct] = useState(15); // % of frame height to crop from bottom
 
   const stopScan = useCallback(() => {
     clearInterval(scanTimerRef.current);
@@ -83,25 +32,6 @@ export default function ScanPage() {
     }
   }, []);
 
-  const handleFound = useCallback(async ({ setCode, cardNumber }) => {
-    clearInterval(scanTimerRef.current);
-    setStatus('found');
-    try {
-      const res = await apiFetch(`/api/cards/lookup?ptcgoCode=${encodeURIComponent(setCode)}&number=${encodeURIComponent(cardNumber)}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setErrorMsg(body.error ?? `Card not found (${setCode} #${cardNumber})`);
-        setStatus('error');
-        return;
-      }
-      const data = await res.json();
-      setMatchPreview(data);
-    } catch (err) {
-      setErrorMsg(err.message);
-      setStatus('error');
-    }
-  }, []);
-
   const doScan = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -112,19 +42,13 @@ export default function ScanPage() {
     const vh = video.videoHeight;
     if (!vw || !vh) return;
 
-    // Crop to bottom 12% of the frame — just the grey number strip.
-    const cropH = Math.floor(vh * 0.12);
+    const cropH = Math.floor(vh * (cropPct / 100));
     const cropY = vh - cropH;
-
-    // Scale up 3x — Tesseract needs characters to be at least ~30px tall.
     const scale = 3;
     canvas.width = vw * scale;
     canvas.height = cropH * scale;
     const ctx = canvas.getContext('2d');
 
-    // Apply the greyscale + contrast filter ON THE DRAW from the video source,
-    // not as a canvas→canvas self-draw (which produces garbled/empty results
-    // in many browsers because you're reading and writing the same buffer).
     ctx.filter = 'grayscale(1) contrast(2.0) brightness(1.1)';
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
@@ -133,30 +57,15 @@ export default function ScanPage() {
 
     try {
       const { data: { text } } = await worker.recognize(canvas);
-      setOcrText(text.trim());
-
-      const parsed = parseCardText(text);
-      if (!parsed) {
-        lastMatchRef.current = null;
-        matchCountRef.current = 0;
-        return;
-      }
-
-      const key = `${parsed.setCode}:${parsed.cardNumber}`;
-      if (key === lastMatchRef.current) {
-        matchCountRef.current += 1;
-      } else {
-        lastMatchRef.current = key;
-        matchCountRef.current = 1;
-      }
-
-      if (matchCountRef.current >= CONFIRM_THRESHOLD) {
-        await handleFound(parsed);
+      const trimmed = text.trim();
+      setOcrText(trimmed);
+      if (trimmed) {
+        setOcrHistory((prev) => [trimmed, ...prev].slice(0, 10));
       }
     } catch {
-      // OCR errors are transient — just keep scanning
+      // transient error — keep scanning
     }
-  }, [handleFound]);
+  }, [cropPct]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,11 +73,7 @@ export default function ScanPage() {
     async function init() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' }, // rear camera on mobile
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -178,13 +83,8 @@ export default function ScanPage() {
           await videoRef.current.play();
         }
 
-        const worker = await createWorker('eng', 1, {
-          logger: () => {}, // silence progress logs
-        });
+        const worker = await createWorker('eng', 1, { logger: () => {} });
         if (cancelled) { worker.terminate(); return; }
-        // PSM 7 = single text line — vastly better than the default (PSM 3 / full page)
-        // for the short "ASC 002/217" strip at the bottom of the card.
-        // Whitelist reduces garbage characters from other card artwork/text.
         await worker.setParameters({
           tessedit_pageseg_mode: '7',
           tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/ ',
@@ -195,21 +95,21 @@ export default function ScanPage() {
         scanTimerRef.current = setInterval(doScan, SCAN_INTERVAL);
       } catch (err) {
         if (cancelled) return;
-        if (err.name === 'NotAllowedError') {
-          setStatus('permission-denied');
-        } else {
-          setErrorMsg(err.message);
-          setStatus('error');
-        }
+        if (err.name === 'NotAllowedError') setStatus('permission-denied');
+        else { setErrorMsg(err.message); setStatus('error'); }
       }
     }
 
     init();
-    return () => {
-      cancelled = true;
-      stopScan();
-    };
+    return () => { cancelled = true; stopScan(); };
   }, [doScan, stopScan]);
+
+  // Restart scanner when cropPct changes
+  useEffect(() => {
+    if (status !== 'scanning') return;
+    clearInterval(scanTimerRef.current);
+    scanTimerRef.current = setInterval(doScan, SCAN_INTERVAL);
+  }, [cropPct, doScan, status]);
 
   const toggleTorch = async () => {
     const track = streamRef.current?.getVideoTracks()[0];
@@ -217,32 +117,14 @@ export default function ScanPage() {
     try {
       await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
       setTorchOn((v) => !v);
-    } catch {
-      // Torch not supported on this device
-    }
-  };
-
-  const goToCard = () => {
-    if (!matchPreview) return;
-    stopScan();
-    navigate(`/sets/${matchPreview.set.id}`, { state: { scanCardId: matchPreview.card.id } });
-  };
-
-  const rescan = () => {
-    setMatchPreview(null);
-    setOcrText('');
-    setErrorMsg('');
-    lastMatchRef.current = null;
-    matchCountRef.current = 0;
-    setStatus('scanning');
-    scanTimerRef.current = setInterval(doScan, SCAN_INTERVAL);
+    } catch { /* torch not supported */ }
   };
 
   return (
     <div className="scan-page">
       <div className="scan-header">
         <button className="back-btn" onClick={() => { stopScan(); navigate(-1); }}>← Back</button>
-        <h2 className="scan-title">📷 Scan a Card</h2>
+        <h2 className="scan-title">📷 OCR Test</h2>
         <button className="scan-torch-btn" onClick={toggleTorch} title="Toggle torch">
           {torchOn ? '🔦' : '💡'}
         </button>
@@ -250,7 +132,6 @@ export default function ScanPage() {
 
       <div className="scan-viewport">
         <video ref={videoRef} className="scan-video" playsInline muted />
-        {/* Guide overlay */}
         <div className="scan-overlay">
           <div className="scan-guide-box">
             <span className="scan-guide-corner tl" />
@@ -258,75 +139,60 @@ export default function ScanPage() {
             <span className="scan-guide-corner bl" />
             <span className="scan-guide-corner br" />
           </div>
-          <div className="scan-guide-label">Point camera at the bottom of the card</div>
+          <div className="scan-guide-label">Point at bottom of card</div>
         </div>
-
-        {/* Status badge */}
-        {status === 'scanning' && (
-          <div className="scan-badge scanning">🔍 Scanning…</div>
-        )}
-        {status === 'starting' && (
-          <div className="scan-badge">⏳ Starting camera…</div>
-        )}
+        {status === 'scanning' && <div className="scan-badge scanning">🔍 Scanning…</div>}
+        {status === 'starting' && <div className="scan-badge">⏳ Starting…</div>}
       </div>
 
-      {/* Hidden canvas for frame capture */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-      {/* OCR debug text (shown while scanning) */}
-      {status === 'scanning' && ocrText && (
-        <div className="scan-debug">
-          <span className="scan-debug-label">Detected text:</span>
-          <span className="scan-debug-text">{ocrText.slice(0, 120)}</span>
-        </div>
-      )}
-
-      {/* Permission denied */}
       {status === 'permission-denied' && (
         <div className="scan-result-panel error">
           <div className="scan-result-icon">🚫</div>
-          <div className="scan-result-msg">Camera access was denied. Please allow camera access in your browser settings and try again.</div>
+          <div className="scan-result-msg">Camera access denied. Allow camera access in browser settings.</div>
         </div>
       )}
 
-      {/* Error */}
       {status === 'error' && (
         <div className="scan-result-panel error">
           <div className="scan-result-icon">⚠️</div>
           <div className="scan-result-msg">{errorMsg || 'Something went wrong.'}</div>
-          <button className="scan-action-btn" onClick={rescan}>Try again</button>
         </div>
       )}
 
-      {/* Found */}
-      {status === 'found' && matchPreview && (
-        <div className="scan-result-panel success">
-          <div className="scan-result-icon">✅</div>
-          <div className="scan-result-name">{matchPreview.card.name}</div>
-          <div className="scan-result-meta">
-            {matchPreview.set.name} · #{matchPreview.card.number}
-            {matchPreview.card.rarity && ` · ${matchPreview.card.rarity}`}
+      {status === 'scanning' && (
+        <div style={{ padding: '12px 16px' }}>
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 13, color: '#aaa' }}>
+              Crop height: bottom <strong>{cropPct}%</strong> of frame
+            </label>
+            <input
+              type="range" min={5} max={40} value={cropPct}
+              onChange={(e) => setCropPct(Number(e.target.value))}
+              style={{ width: '100%', marginTop: 4 }}
+            />
           </div>
-          {matchPreview.card.images?.small && (
-            <img className="scan-result-img" src={matchPreview.card.images.small} alt={matchPreview.card.name} />
+
+          <div style={{ background: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Latest OCR read:</div>
+            <div style={{ fontSize: 15, color: '#e0e0e0', fontFamily: 'monospace', minHeight: 22, wordBreak: 'break-all' }}>
+              {ocrText || <span style={{ color: '#555' }}>(nothing yet)</span>}
+            </div>
+          </div>
+
+          {ocrHistory.length > 0 && (
+            <div style={{ background: '#111', borderRadius: 8, padding: 10 }}>
+              <div style={{ fontSize: 11, color: '#888', marginBottom: 6 }}>Last 10 reads:</div>
+              {ocrHistory.map((t, i) => (
+                <div key={i} style={{ fontSize: 13, color: i === 0 ? '#fff' : '#666', fontFamily: 'monospace', marginBottom: 3, wordBreak: 'break-all' }}>
+                  {t || '—'}
+                </div>
+              ))}
+            </div>
           )}
-          <div className="scan-result-actions">
-            <button className="scan-action-btn primary" onClick={goToCard}>View Card →</button>
-            <button className="scan-action-btn" onClick={rescan}>Scan Another</button>
-          </div>
         </div>
       )}
-
-      {/* Loading state while looking up */}
-      {status === 'found' && !matchPreview && !errorMsg && (
-        <div className="scan-result-panel">
-          <div className="scan-result-msg">Looking up card…</div>
-        </div>
-      )}
-
-      <div className="scan-instructions">
-        <p>Hold the card steady so the bottom of the card is visible. The app will automatically detect the set and card number.</p>
-      </div>
     </div>
   );
 }
