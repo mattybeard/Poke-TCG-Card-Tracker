@@ -1,9 +1,9 @@
-import { createServiceClient } from '../lib/supabase.js';
+import { createSupabaseClient } from '../lib/supabase.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end();
 
-  const supabase = createServiceClient();
+  const supabase = createSupabaseClient();
 
   const { data: rows, error } = await supabase
     .from('sets')
