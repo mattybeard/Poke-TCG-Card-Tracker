@@ -50,11 +50,13 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: `No set found with code "${ptcgoCode}"` });
     }
     const set = sets[0];
+    // Try number as-is (e.g. "002") then without leading zeros (e.g. "2")
+    const stripped = String(parseInt(number, 10));
     const { data: cards, error: cardError } = await supabase
       .from('cards')
       .select('*')
       .eq('set_id', set.id)
-      .eq('number', number)
+      .in('number', [number, stripped])
       .limit(1);
     if (cardError) return res.status(500).json({ error: cardError.message });
     if (!cards || cards.length === 0) {

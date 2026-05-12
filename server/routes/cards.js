@@ -26,7 +26,9 @@ router.get('/lookup', (req, res) => {
   const set = db.prepare(`SELECT * FROM sets WHERE ptcgo_code = ? COLLATE NOCASE`).get(ptcgoCode);
   if (!set) return res.status(404).json({ error: `No set found with code "${ptcgoCode}"` });
 
-  const card = db.prepare(`SELECT * FROM cards WHERE set_id = ? AND number = ?`).get(set.id, number);
+  // Try the number as-is first (e.g. "002"), then without leading zeros (e.g. "2")
+  const stripped = String(parseInt(number, 10));
+  const card = db.prepare(`SELECT * FROM cards WHERE set_id = ? AND (number = ? OR number = ?)`).get(set.id, number, stripped);
   if (!card) return res.status(404).json({ error: `Card #${number} not found in set "${ptcgoCode}"` });
 
   res.json({

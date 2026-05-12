@@ -9,39 +9,48 @@ const CONFIRM_THRESHOLD = 2;
 const SCAN_INTERVAL = 700;
 
 // Extract set code (2-5 uppercase letters) and card number from OCR text.
-// Pokemon card bottom-right typically has something like: SCR 121/142
-// or the code and number may appear on separate lines.
+// Pokemon card bottom-left has the format: ASC 002/217
+// Primary: match SETCODE immediately adjacent to NNN/TTT (most reliable)
+// Fallback: find them separately and pick the closest code to the number.
 function parseCardText(text) {
   // Normalise: collapse whitespace, uppercase
   const normalised = text.replace(/\s+/g, ' ').toUpperCase();
 
-  // Match a number/total pattern — the number before the slash is what we want
+  // Primary pattern: set code directly before the number, e.g. "ASC 002/217" or "ASC002/217"
+  // Allows 0-4 spaces/noise chars between the code and the number
+  const primary = normalised.match(/\b([A-Z]{2,5})\s{0,4}(\d{1,3})\/\d{1,3}\b/);
+  if (primary) {
+    return { setCode: primary[1], cardNumber: primary[2] };
+  }
+
+  // Fallback: find the number pattern and the closest uppercase word to it
   const numMatch = normalised.match(/\b(\d{1,3})\/(\d{1,3})\b/);
   if (!numMatch) return null;
   const cardNumber = numMatch[1];
 
-  // Look for a 2–5 letter uppercase set code near the number
-  // Try: code directly before or after the number string
-  const codeMatch = normalised.match(/\b([A-Z]{2,5})\b/g);
-  if (!codeMatch || codeMatch.length === 0) return null;
+  const STOP_WORDS = new Set([
+    'THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 'ARE', 'WAS',
+    'NOT', 'YOU', 'YOUR', 'ALL', 'HAVE', 'WILL', 'BEEN', 'THEY', 'CAN',
+    'ITS', 'HAS', 'HIT', 'GET', 'HP', 'NO', 'WT', 'HT',
+  ]);
 
-  // Filter out common English words that aren't set codes
-  const STOP_WORDS = new Set(['THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 'ARE', 'WAS', 'NOT', 'YOU', 'YOUR', 'ALL', 'HAVE', 'WILL', 'BEEN', 'THEY', 'CAN']);
-  const candidates = codeMatch.filter((w) => !STOP_WORDS.has(w));
+  const codeMatches = [...normalised.matchAll(/\b([A-Z]{2,5})\b/g)];
+  const candidates = codeMatches.filter((m) => !STOP_WORDS.has(m[1]));
   if (candidates.length === 0) return null;
 
-  // Prefer candidates that appear closest to the number pattern in the string
   const numIdx = normalised.indexOf(numMatch[0]);
   let bestCode = null;
   let bestDist = Infinity;
-  for (const code of candidates) {
-    const idx = normalised.indexOf(code);
-    const dist = Math.abs(idx - numIdx);
+  for (const m of candidates) {
+    const dist = Math.abs(m.index - numIdx);
     if (dist < bestDist) {
       bestDist = dist;
-      bestCode = code;
+      bestCode = m[1];
     }
   }
+
+  // Reject if the best candidate is more than 20 chars away — likely unrelated text
+  if (bestDist > 20) return null;
 
   return bestCode ? { setCode: bestCode, cardNumber } : null;
 }
@@ -103,17 +112,22 @@ export default function ScanPage() {
     const vh = video.videoHeight;
     if (!vw || !vh) return;
 
-    // Crop to bottom 30% of the frame — that's where set code + number live
-    const cropH = Math.floor(vh * 0.30);
+    // Crop to bottom 20% of the frame — set code + card number live here.
+    // Tighter crop = less noise text for OCR to get confused by.
+    const cropH = Math.floor(vh * 0.20);
     const cropY = vh - cropH;
 
-    canvas.width = vw;
-    canvas.height = cropH;
+    // Scale up 2x before OCR — Tesseract accuracy improves significantly
+    // when characters are larger (target ~30px tall for the small bottom text)
+    const scale = 2;
+    canvas.width = vw * scale;
+    canvas.height = cropH * scale;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw, cropH);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw * scale, cropH * scale);
 
-    // Boost contrast to help Tesseract
-    ctx.filter = 'contrast(1.4) brightness(1.1)';
+    // Boost contrast to help Tesseract with the light-grey bottom strip
+    ctx.filter = 'contrast(1.6) brightness(1.05) saturate(0)';
     ctx.drawImage(canvas, 0, 0);
     ctx.filter = 'none';
 
