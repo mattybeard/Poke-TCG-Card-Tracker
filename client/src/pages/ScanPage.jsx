@@ -112,23 +112,23 @@ export default function ScanPage() {
     const vh = video.videoHeight;
     if (!vw || !vh) return;
 
-    // Crop to bottom 20% of the frame — set code + card number live here.
-    // Tighter crop = less noise text for OCR to get confused by.
-    const cropH = Math.floor(vh * 0.20);
+    // Crop to bottom 12% of the frame — just the grey number strip.
+    const cropH = Math.floor(vh * 0.12);
     const cropY = vh - cropH;
 
-    // Scale up 2x before OCR — Tesseract accuracy improves significantly
-    // when characters are larger (target ~30px tall for the small bottom text)
-    const scale = 2;
+    // Scale up 3x — Tesseract needs characters to be at least ~30px tall.
+    const scale = 3;
     canvas.width = vw * scale;
     canvas.height = cropH * scale;
     const ctx = canvas.getContext('2d');
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw * scale, cropH * scale);
 
-    // Boost contrast to help Tesseract with the light-grey bottom strip
-    ctx.filter = 'contrast(1.6) brightness(1.05) saturate(0)';
-    ctx.drawImage(canvas, 0, 0);
+    // Apply the greyscale + contrast filter ON THE DRAW from the video source,
+    // not as a canvas→canvas self-draw (which produces garbled/empty results
+    // in many browsers because you're reading and writing the same buffer).
+    ctx.filter = 'grayscale(1) contrast(2.0) brightness(1.1)';
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw * scale, cropH * scale);
     ctx.filter = 'none';
 
     try {
@@ -182,6 +182,13 @@ export default function ScanPage() {
           logger: () => {}, // silence progress logs
         });
         if (cancelled) { worker.terminate(); return; }
+        // PSM 7 = single text line — vastly better than the default (PSM 3 / full page)
+        // for the short "ASC 002/217" strip at the bottom of the card.
+        // Whitelist reduces garbage characters from other card artwork/text.
+        await worker.setParameters({
+          tessedit_pageseg_mode: '7',
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/ ',
+        });
         workerRef.current = worker;
 
         setStatus('scanning');
@@ -251,7 +258,7 @@ export default function ScanPage() {
             <span className="scan-guide-corner bl" />
             <span className="scan-guide-corner br" />
           </div>
-          <div className="scan-guide-label">Point camera at bottom-right of card</div>
+          <div className="scan-guide-label">Point camera at the bottom of the card</div>
         </div>
 
         {/* Status badge */}
