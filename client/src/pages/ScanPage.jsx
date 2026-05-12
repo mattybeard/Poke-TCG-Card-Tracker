@@ -5,6 +5,37 @@ const OCR_API_URL = 'https://api.ocr.space/parse/image';
 const OCR_API_KEY = import.meta.env.VITE_OCR_SPACE_KEY;
 
 /**
+ * Parse OCR text to extract Pokémon TCG set code and card number.
+ *
+ * Cards print the set code + language suffix directly before the card number:
+ *   e.g. "ASCEN 002/217"  →  setCode=ASC, cardNumber=002
+ *        "ASCJP 002/217"  →  setCode=ASC, cardNumber=002
+ *        "BEN 045/198"    →  setCode=B,   cardNumber=045
+ *
+ * Set codes are 1–5 uppercase letters, always followed by EN or JP.
+ * The language suffix is stripped before returning.
+ */
+function parseCardText(text) {
+  const upper = text.toUpperCase().replace(/\s+/g, ' ');
+
+  // Primary: set code (with optional EN/JP suffix) directly before NNN/TTT
+  // Allows 0-3 spaces between the code and the number
+  const match = upper.match(/\b([A-Z]{1,5}(?:EN|JP)?)\s{0,3}(\d{1,3})\/\d{1,3}/);
+  if (!match) return null;
+
+  let setCode = match[1];
+  const cardNumber = match[2];
+
+  // Strip language suffix if present
+  if (setCode.endsWith('EN') || setCode.endsWith('JP')) {
+    setCode = setCode.slice(0, -2);
+  }
+
+  if (!setCode) return null;
+  return { setCode, cardNumber };
+}
+
+/**
  * Map a rectangle from display-space (pixels on screen) back to video-frame
  * pixel coordinates, accounting for object-fit: cover scaling/cropping.
  */
@@ -65,6 +96,7 @@ export default function ScanPage() {
   const [status, setStatus] = useState('starting');
   const [ocrText, setOcrText] = useState('');
   const [ocrHistory, setOcrHistory] = useState([]);
+  const [parsedCard, setParsedCard] = useState(null); // { setCode, cardNumber }
   const [errorMsg, setErrorMsg] = useState('');
   const [torchOn, setTorchOn] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -128,6 +160,7 @@ export default function ScanPage() {
       if (data.IsErroredOnProcessing) {
         const errMsg = data.ErrorMessage?.[0] || 'OCR processing failed';
         setOcrText(`Error: ${errMsg}`);
+        setParsedCard(null);
       } else {
         const text = (data.ParsedResults || [])
           .map((r) => r.ParsedText)
@@ -136,6 +169,10 @@ export default function ScanPage() {
         setOcrText(text || '(no text detected)');
         if (text) {
           setOcrHistory((prev) => [text, ...prev].slice(0, 15));
+          const parsed = parseCardText(text);
+          setParsedCard(parsed);
+        } else {
+          setParsedCard(null);
         }
       }
     } catch (err) {
@@ -244,6 +281,30 @@ export default function ScanPage() {
           >
             {processing ? '⏳ Sending to OCR.space…' : '📸 Capture & Read'}
           </button>
+
+          {/* Match banner — shown whenever we successfully parse a set + card number */}
+          {parsedCard && (
+            <div style={{
+              background: '#1a3d1a', border: '2px solid #4caf50', borderRadius: 10,
+              padding: '14px 16px', marginBottom: 12, textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 22, marginBottom: 4 }}>✅</div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: '#81c784' }}>
+                Found card #{parsedCard.cardNumber} from set <span style={{ color: '#ffcb05' }}>{parsedCard.setCode}</span>
+              </div>
+            </div>
+          )}
+
+          {/* No match notice */}
+          {!parsedCard && ocrText && !ocrText.startsWith('Error') && (
+            <div style={{
+              background: '#2a1a1a', border: '1px solid #555', borderRadius: 10,
+              padding: '10px 14px', marginBottom: 12, textAlign: 'center',
+              color: '#aaa', fontSize: 13,
+            }}>
+              ⚠️ Text found but couldn't identify a set code + card number
+            </div>
+          )}
 
           <div style={{ marginBottom: 10 }}>
             <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Captured region (what OCR sees):</div>
