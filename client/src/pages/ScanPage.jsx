@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createWorker } from 'tesseract.js';
+
+const OCR_API_URL = 'https://api.ocr.space/parse/image';
+const OCR_API_KEY = import.meta.env.VITE_OCR_SPACE_KEY;
 
 export default function ScanPage() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
-  const workerRef = useRef(null);
   const streamRef = useRef(null);
 
   const [status, setStatus] = useState('starting');
@@ -23,19 +24,13 @@ export default function ScanPage() {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
-    if (workerRef.current) {
-      workerRef.current.terminate();
-      workerRef.current = null;
-    }
   }, []);
 
-  // Capture a single high-res frame and OCR it
   const captureAndRecognize = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const preview = previewCanvasRef.current;
-    const worker = workerRef.current;
-    if (!video || !canvas || !worker || video.readyState < 2) return;
+    if (!video || !canvas || video.readyState < 2) return;
     if (processing) return;
 
     setProcessing(true);
@@ -44,51 +39,57 @@ export default function ScanPage() {
     const vh = video.videoHeight;
     if (!vw || !vh) { setProcessing(false); return; }
 
-    // Crop bottom N% of the frame
     const cropH = Math.floor(vh * (cropPct / 100));
     const cropY = vh - cropH;
 
-    // Draw at full resolution (no scaling down, but upscale small frames)
-    const scale = vw < 1000 ? 3 : 2;
-    canvas.width = vw * scale;
-    canvas.height = cropH * scale;
+    // Draw cropped region at full resolution
+    canvas.width = vw;
+    canvas.height = cropH;
     const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, vw, cropH);
 
-    // Draw WITHOUT filters first — raw capture
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, canvas.width, canvas.height);
-
-    // Manual pixel-level processing for reliable cross-browser greyscale + contrast
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imageData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      // Convert to greyscale
-      let grey = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      // Apply contrast (factor 2.0 around midpoint 128)
-      grey = ((grey - 128) * 2.0) + 128;
-      // Clamp
-      grey = grey < 0 ? 0 : grey > 255 ? 255 : grey;
-      d[i] = d[i + 1] = d[i + 2] = grey;
-    }
-    ctx.putImageData(imageData, 0, 0);
-
-    // Show the processed image so user can see what Tesseract receives
+    // Show preview
     if (preview) {
-      preview.width = canvas.width;
-      preview.height = canvas.height;
+      preview.width = vw;
+      preview.height = cropH;
       preview.getContext('2d').drawImage(canvas, 0, 0);
     }
 
+    // Convert to base64 JPEG
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+
     try {
-      const { data: { text } } = await worker.recognize(canvas);
-      const trimmed = text.trim();
-      setOcrText(trimmed);
-      if (trimmed) {
-        setOcrHistory((prev) => [trimmed, ...prev].slice(0, 15));
+      const formData = new FormData();
+      formData.append('base64Image', dataUrl);
+      formData.append('language', 'eng');
+      formData.append('isOverlayRequired', 'false');
+      formData.append('scale', 'true');         // upscales small images server-side
+      formData.append('OCREngine', '2');         // Engine 2 is better for photos/camera
+      formData.append('isTable', 'false');
+
+      const res = await fetch(OCR_API_URL, {
+        method: 'POST',
+        headers: { apikey: OCR_API_KEY },
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (data.IsErroredOnProcessing) {
+        const errMsg = data.ErrorMessage?.[0] || 'OCR processing failed';
+        setOcrText(`Error: ${errMsg}`);
+      } else {
+        const text = (data.ParsedResults || [])
+          .map((r) => r.ParsedText)
+          .join('\n')
+          .trim();
+        setOcrText(text || '(no text detected)');
+        if (text) {
+          setOcrHistory((prev) => [text, ...prev].slice(0, 15));
+        }
       }
     } catch (err) {
-      setOcrText(`Error: ${err.message}`);
+      setOcrText(`Network error: ${err.message}`);
     }
 
     setProcessing(false);
@@ -98,6 +99,11 @@ export default function ScanPage() {
     let cancelled = false;
 
     async function init() {
+      if (!OCR_API_KEY) {
+        setErrorMsg('Missing VITE_OCR_SPACE_KEY environment variable');
+        setStatus('error');
+        return;
+      }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -113,16 +119,6 @@ export default function ScanPage() {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
         }
-
-        const worker = await createWorker('eng', 1, { logger: () => {} });
-        if (cancelled) { worker.terminate(); return; }
-        // PSM 6 = uniform block of text — more forgiving than PSM 7 (single line)
-        // NO character whitelist — let Tesseract read everything so we can debug
-        await worker.setParameters({
-          tessedit_pageseg_mode: '6',
-        });
-        workerRef.current = worker;
-
         setStatus('scanning');
       } catch (err) {
         if (cancelled) return;
@@ -168,7 +164,6 @@ export default function ScanPage() {
         {status === 'starting' && <div className="scan-badge">⏳ Starting…</div>}
       </div>
 
-      {/* Hidden working canvas */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       {status === 'permission-denied' && (
@@ -187,7 +182,6 @@ export default function ScanPage() {
 
       {status === 'scanning' && (
         <div style={{ padding: '12px 16px' }}>
-          {/* Capture button */}
           <button
             onClick={captureAndRecognize}
             disabled={processing}
@@ -198,24 +192,22 @@ export default function ScanPage() {
               marginBottom: 12,
             }}
           >
-            {processing ? '⏳ Processing…' : '📸 Capture & Read'}
+            {processing ? '⏳ Sending to OCR.space…' : '📸 Capture & Read'}
           </button>
 
-          {/* Crop slider */}
           <div style={{ marginBottom: 10 }}>
             <label style={{ fontSize: 13, color: '#aaa' }}>
               Crop: bottom <strong>{cropPct}%</strong> of frame
             </label>
             <input
-              type="range" min={5} max={50} value={cropPct}
+              type="range" min={5} max={60} value={cropPct}
               onChange={(e) => setCropPct(Number(e.target.value))}
               style={{ width: '100%', marginTop: 4 }}
             />
           </div>
 
-          {/* Show the processed image Tesseract actually sees */}
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>What Tesseract sees:</div>
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Captured region:</div>
             <canvas
               ref={previewCanvasRef}
               style={{
@@ -225,9 +217,8 @@ export default function ScanPage() {
             />
           </div>
 
-          {/* Latest read */}
           <div style={{ background: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Latest OCR result:</div>
+            <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>OCR result:</div>
             <div style={{
               fontSize: 15, color: '#e0e0e0', fontFamily: 'monospace',
               minHeight: 22, wordBreak: 'break-all', whiteSpace: 'pre-wrap',
@@ -236,7 +227,6 @@ export default function ScanPage() {
             </div>
           </div>
 
-          {/* History */}
           {ocrHistory.length > 0 && (
             <div style={{ background: '#111', borderRadius: 8, padding: 10 }}>
               <div style={{ fontSize: 11, color: '#888', marginBottom: 6 }}>Previous reads:</div>
