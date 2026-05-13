@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { apiFetch } from '../lib/apiFetch.js';
 
 const OCR_API_URL = 'https://api.ocr.space/parse/image';
 const OCR_API_KEY = import.meta.env.VITE_OCR_SPACE_KEY;
@@ -97,6 +98,9 @@ export default function ScanPage() {
   const [ocrText, setOcrText] = useState('');
   const [ocrHistory, setOcrHistory] = useState([]);
   const [parsedCard, setParsedCard] = useState(null); // { setCode, cardNumber }
+  const [cardResult, setCardResult] = useState(null); // { card, set } from API
+  const [cardLookupError, setCardLookupError] = useState('');
+  const [cardLooking, setCardLooking] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [torchOn, setTorchOn] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -107,6 +111,39 @@ export default function ScanPage() {
       streamRef.current = null;
     }
   }, []);
+
+  // Auto-lookup card in the database whenever OCR finds a set code + number
+  useEffect(() => {
+    if (!parsedCard) {
+      setCardResult(null);
+      setCardLookupError('');
+      return;
+    }
+    let cancelled = false;
+    async function lookup() {
+      setCardLooking(true);
+      setCardResult(null);
+      setCardLookupError('');
+      try {
+        const res = await apiFetch(
+          `/api/cards/lookup?ptcgoCode=${encodeURIComponent(parsedCard.setCode)}&number=${encodeURIComponent(parsedCard.cardNumber)}`
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setCardLookupError(body.error ?? 'Card not found in database');
+        } else {
+          const data = await res.json();
+          setCardResult(data);
+        }
+      } catch (err) {
+        if (!cancelled) setCardLookupError(err.message);
+      }
+      if (!cancelled) setCardLooking(false);
+    }
+    lookup();
+    return () => { cancelled = true; };
+  }, [parsedCard]);
 
   const captureAndRecognize = useCallback(async () => {
     const video = videoRef.current;
@@ -291,6 +328,62 @@ export default function ScanPage() {
               <div style={{ fontSize: 22, marginBottom: 4 }}>✅</div>
               <div style={{ fontSize: 17, fontWeight: 700, color: '#81c784' }}>
                 Found card #{parsedCard.cardNumber} from set <span style={{ color: '#ffcb05' }}>{parsedCard.setCode}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Card lookup result */}
+          {parsedCard && cardLooking && (
+            <div style={{ textAlign: 'center', padding: '16px', color: '#aaa', fontSize: 14, marginBottom: 12 }}>
+              ⏳ Looking up card…
+            </div>
+          )}
+
+          {parsedCard && cardLookupError && !cardLooking && (
+            <div style={{
+              background: '#2a1a1a', border: '1px solid #ef5350', borderRadius: 10,
+              padding: '12px 14px', marginBottom: 12, textAlign: 'center',
+              color: '#ef9a9a', fontSize: 13,
+            }}>
+              ⚠️ {cardLookupError}
+            </div>
+          )}
+
+          {cardResult && !cardLooking && (
+            <div style={{
+              background: '#1a1a2e', border: '1px solid #333', borderRadius: 10,
+              padding: '14px', marginBottom: 12, display: 'flex', gap: 14, alignItems: 'flex-start',
+            }}>
+              {cardResult.card.images?.small && (
+                <img
+                  src={cardResult.card.images.small}
+                  alt={cardResult.card.name}
+                  style={{ width: 90, borderRadius: 6, flexShrink: 0 }}
+                />
+              )}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 4 }}>
+                  {cardResult.card.name}
+                </div>
+                <div style={{ fontSize: 13, color: '#aaa', marginBottom: 2 }}>
+                  {cardResult.set.name}
+                </div>
+                <div style={{ fontSize: 13, color: '#888', marginBottom: 8 }}>
+                  #{cardResult.card.number}{cardResult.card.rarity ? ` · ${cardResult.card.rarity}` : ''}
+                </div>
+                <button
+                  onClick={() => {
+                    stopCamera();
+                    navigate(`/sets/${cardResult.set.id}`, { state: { scanCardId: cardResult.card.id } });
+                  }}
+                  style={{
+                    background: '#ffcb05', color: '#1a1a2e', border: 'none',
+                    borderRadius: 8, padding: '8px 14px', fontWeight: 700,
+                    fontSize: 13, cursor: 'pointer',
+                  }}
+                >
+                  View Card →
+                </button>
               </div>
             </div>
           )}
