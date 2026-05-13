@@ -1108,3 +1108,189 @@ h2 { font-size: 1.3rem; font-weight: 600; margin-bottom: 12px; }
   color: var(--text-muted);
   opacity: 0.7;
 }
+/* ── Scan Page ── */
+.scan-page {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 0 0 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.scan-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.scan-title {
+  flex: 1;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--yellow);
+  margin: 0;
+}
+
+.scan-torch-btn {
+  background: var(--surface2);
+  border: 1px solid var(--text-muted);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 6px 10px;
+  transition: background 0.15s;
+}
+.scan-torch-btn:hover { background: var(--surface); }
+
+.scan-viewport {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4/3;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 2px solid var(--surface2);
+}
+
+.scan-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.scan-guide-box {
+  position: relative;
+  width: 75%;
+  aspect-ratio: 2.5/3.5;
+  border: none;
+}
+
+/* Animated corner markers */
+.scan-guide-corner {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-color: var(--yellow);
+  border-style: solid;
+  border-width: 0;
+}
+.scan-guide-corner.tl { top: 0; left: 0; border-top-width: 3px; border-left-width: 3px; border-radius: 3px 0 0 0; }
+.scan-guide-corner.tr { top: 0; right: 0; border-top-width: 3px; border-right-width: 3px; border-radius: 0 3px 0 0; }
+.scan-guide-corner.bl { bottom: 0; left: 0; border-bottom-width: 3px; border-left-width: 3px; border-radius: 0 0 0 3px; }
+.scan-guide-corner.br { bottom: 0; right: 0; border-bottom-width: 3px; border-right-width: 3px; border-radius: 0 0 3px 0; }
+
+/* Highlight bottom strip where set code / number lives */
+.scan-guide-box::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 28%;
+  background: rgba(255, 203, 5, 0.12);
+  border-top: 1px dashed rgba(255, 203, 5, 0.4);
+  border-radius: 0 0 2px 2px;
+}
+
+.scan-guide-label {
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: rgba(255,255,255,0.7);
+  text-align: center;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+}
+
+.scan-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.65);
+  color: var(--text);
+  border-radius: 20px;
+  padding: 4px 14px;
+  font-size: 0.8rem;
+  backdrop-filter: blur(4px);
+  white-space: nowrap;
+}
+.scan-badge.scanning { color: var(--yellow); }
+
+.scan-debug {
+  background: var(--surface);
+  border: 1px solid var(--surface2);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  word-break: break-all;
+  min-height: 44px;
+}
+.scan-debug-label {
+  font-weight: 600;
+  color: var(--text);
+  margin-right: 8px;
+}
+
+.scan-result-panel {
+  background: var(--surface);
+  border: 1px solid var(--surface2);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.scan-result-panel.success { border-color: #4caf50; }
+.scan-result-panel.error   { border-color: #ef5350; }
+
+.scan-result-icon { font-size: 2rem; }
+.scan-result-name { font-size: 1.2rem; font-weight: 700; color: var(--text); }
+.scan-result-meta { font-size: 0.82rem; color: var(--text-muted); }
+
+.scan-result-img {
+  width: 160px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.scan-result-msg { color: var(--text-muted); font-size: 0.9rem; max-width: 320px; }
+
+.scan-result-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+.scan-action-btn {
+  background: var(--surface2);
+  border: 1px solid var(--text-muted);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 8px 18px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.scan-action-btn:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
+.scan-action-btn.primary { background: var(--yellow); border-color: var(--yellow); color: #1a1a2e; font-weight: 700; }
+.scan-action-btn.primary:hover { background: #e6b800; border-color: #e6b800; }
+
+.scan-instructions {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.5;
+  padding: 0 8px;
+}

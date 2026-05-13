@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import CardModal from '../components/CardModal.jsx';
 import { getAvailableFinishes, FINISH_LABELS } from '../utils/finishes.js';
 import { apiFetch } from '../lib/apiFetch.js';
@@ -33,6 +33,7 @@ function getRarityColor(rarity) {
 export default function CardsPage() {
   const { setId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
 
   // Initialise filters from localStorage (per set)
   const saved = loadSavedFilters(setId);
@@ -111,6 +112,19 @@ export default function CardsPage() {
 
     loadCollection();
   }, [setId, loadCollection]);
+
+  // Auto-open a card when navigated here from the scanner
+  useEffect(() => {
+    const scanCardId = location.state?.scanCardId;
+    if (!scanCardId || loading || cards.length === 0) return;
+    const found = cards.find((c) => c.id === scanCardId);
+    if (found) {
+      const defaultFinish = getAvailableFinishes(found.variants)[0];
+      setSelectedCard({ card: found, initialFinish: defaultFinish });
+      // Clear state so refreshing doesn't re-open
+      window.history.replaceState({}, '');
+    }
+  }, [location.state, cards, loading]);
 
   // In unstacked mode: expand to per-finish variants first, then filter at finish level.
   // In stacked mode: filter at card level, then represent as (card, null).

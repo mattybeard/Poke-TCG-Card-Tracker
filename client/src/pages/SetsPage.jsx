@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { apiFetch } from '../lib/apiFetch.js';
+import { useAuth } from '../context/AuthContext.jsx';
 
 export default function SetsPage() {
   const [sets, setSets] = useState([]);
@@ -9,6 +10,7 @@ export default function SetsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const { isAdmin } = useAuth();
 
   useEffect(() => {
     apiFetch('/api/sets')
@@ -46,7 +48,27 @@ export default function SetsPage() {
   }, {});
 
   if (loading) return <div className="loading">Loading sets…</div>;
-  if (error) return <div className="loading" style={{ color: '#ef9a9a' }}>Error: {error}</div>;
+  if (error) {
+    const needsSync = error.toLowerCase().includes('sync');
+    return (
+      <div className="empty-state" style={{ marginTop: 48 }}>
+        <span className="emoji">🃏</span>
+        <p style={{ color: 'var(--text-muted)', marginBottom: 16 }}>
+          {needsSync ? 'No card data found. The database needs to be populated before you can browse sets.' : `Error: ${error}`}
+        </p>
+        {needsSync && isAdmin && (
+          <Link to="/sync">
+            <button className="scan-action-btn primary" style={{ fontSize: '1rem', padding: '10px 24px' }}>
+              🔄 Go to Sync page
+            </button>
+          </Link>
+        )}
+        {needsSync && !isAdmin && (
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Please ask an admin to run a sync.</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div>

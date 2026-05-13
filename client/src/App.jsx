@@ -11,6 +11,7 @@ import WishlistPage from './pages/WishlistPage.jsx';
 import SyncPage from './pages/SyncPage.jsx';
 import AdminPage from './pages/AdminPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
+import ScanPage from './pages/ScanPage.jsx';
 
 export default function App() {
   return (
@@ -29,6 +30,7 @@ export default function App() {
                   <Route path="/collection" element={<CollectionPage />} />
                   <Route path="/wishlist" element={<WishlistPage />} />
                   <Route path="/sync" element={<SyncPage />} />
+                  <Route path="/scan" element={<ScanPage />} />
                   <Route path="/admin" element={<AdminGuard><AdminPage /></AdminGuard>} />
                 </Routes>
               </main>

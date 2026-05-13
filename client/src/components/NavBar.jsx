@@ -12,6 +12,7 @@ export default function NavBar() {
       <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>Browse Sets</NavLink>
       <NavLink to="/collection" className={({ isActive }) => isActive ? 'active' : ''}>My Collection</NavLink>
       <NavLink to="/wishlist" className={({ isActive }) => isActive ? 'active' : ''}>Wishlist</NavLink>
+      <NavLink to="/scan" className={({ isActive }) => isActive ? 'active' : ''}>📷 Scan</NavLink>
       {isAdmin && (
         <NavLink to="/sync" className={({ isActive }) => isActive ? 'active' : ''} style={{ fontSize: '0.85rem' }}>🔄 Sync</NavLink>
       )}

@@ -226,6 +226,92 @@ export default async function handler(req, res) {
       }
     }
 
+    // Refill phase — re-fetch cards that exist as stubs (small_image IS NULL)
+    if (phase === 'refill') {
+      // Load or initialise the refill cursor from sync_meta
+      const { data: metaRows } = await supabase
+        .from('sync_meta')
+        .select('key, value')
+        .in('key', ['refill_ids', 'refill_cursor']);
+      const meta = Object.fromEntries((metaRows ?? []).map((r) => [r.key, r.value]));
+
+      let refillIds = JSON.parse(meta.refill_ids ?? 'null');
+      let cursor    = parseInt(meta.refill_cursor ?? '0', 10);
+
+      // First call: build the list of stub card IDs
+      if (!refillIds) {
+        log('Building list of stub cards (small_image IS NULL)…');
+        refillIds = [];
+        let from = 0;
+        while (true) {
+          const { data: page, error } = await supabase
+            .from('cards')
+            .select('id')
+            .is('small_image', null)
+            .range(from, from + 999);
+          if (error) throw new Error(`Stub query: ${error.message}`);
+          if (!page || page.length === 0) break;
+          page.forEach((c) => refillIds.push(c.id));
+          if (page.length < 1000) break;
+          from += 1000;
+        }
+        cursor = 0;
+        await supabase.from('sync_meta').upsert([
+          { key: 'refill_ids',    value: JSON.stringify(refillIds) },
+          { key: 'refill_cursor', value: '0' },
+        ], { onConflict: 'key' });
+        log(`Found ${refillIds.length} stub cards to refill.`);
+      }
+
+      if (refillIds.length === 0) {
+        log('No stub cards found — all cards already have image data!');
+        return res.end();
+      }
+
+      const slice = refillIds.slice(cursor, cursor + CARD_BATCH_SIZE);
+      log(`Refilling cards ${cursor + 1}–${cursor + slice.length} of ${refillIds.length}…`);
+
+      for (let i = 0; i < slice.length; i += BATCH) {
+        const batch = slice.slice(i, i + BATCH);
+        const cards = await fetchBatch(batch.map((id) => `${API}/cards/${id}`));
+        const rows = cards.filter(Boolean).map((card) => ({
+          id: card.id,
+          set_id: card.set?.id ?? card.id.split('-')[0],
+          name: card.name,
+          number: card.localId ?? null,
+          rarity: card.rarity ?? null,
+          subtypes: card.stage ? [card.stage] : null,
+          variants: card.variants ?? null,
+          small_image: card.image ? `${card.image}/low.webp` : null,
+          large_image: card.image ? `${card.image}/high.webp` : null,
+        }));
+        if (rows.length) {
+          const { error } = await supabase.from('cards').upsert(rows, { onConflict: 'id' });
+          if (error) throw new Error(`Refill upsert: ${error.message}`);
+        }
+        await sleep(80);
+      }
+
+      const newCursor = cursor + slice.length;
+      const remaining = refillIds.length - newCursor;
+
+      if (remaining <= 0) {
+        await supabase.from('sync_meta').upsert([
+          { key: 'refill_ids',    value: 'null' },
+          { key: 'refill_cursor', value: '0' },
+        ], { onConflict: 'key' });
+        log(`Refill complete! Filled ${refillIds.length} stub cards.`);
+      } else {
+        await supabase.from('sync_meta').upsert(
+          { key: 'refill_cursor', value: String(newCursor) },
+          { onConflict: 'key' }
+        );
+        log(`Batch complete. ${remaining} cards remaining — run phase=refill again to continue.`);
+      }
+
+      return res.end();
+    }
+
     // Cards phase — fetch next CARD_BATCH_SIZE pending cards
     if (phase === 'cards' || phase === 'auto') {
       const { data: metaRows } = await supabase
