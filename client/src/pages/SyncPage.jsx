@@ -150,6 +150,7 @@ export default function SyncPage() {
   const [done, setDone] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [hasPriceMore, setHasPriceMore] = useState(false);
+  const [hasRefillMore, setHasRefillMore] = useState(false);
   const [status, setStatus] = useState(null);
 
   useEffect(() => {
@@ -175,13 +176,14 @@ export default function SyncPage() {
       const hasRemaining = lines.some((l) => l.includes('remaining'));
       if (phase === 'prices') {
         setHasPriceMore(hasRemaining);
-        // Refresh status to pick up updated last_price_sync
         if (!hasRemaining) apiFetch('/api/sync').then(async (r) => { if (r.ok) setStatus(await r.json()); });
+      } else if (phase === 'refill') {
+        setHasRefillMore(hasRemaining);
       } else {
         setHasMore(hasRemaining);
         if (!hasRemaining) apiFetch('/api/sync').then(async (r) => { if (r.ok) setStatus(await r.json()); });
       }
-      setDone(!hasRemaining && phase !== 'prices');
+      setDone(!hasRemaining && phase !== 'prices' && phase !== 'refill');
     } catch (err) {
       setLog((prev) => [...prev, `Error: ${err.message}`]);
     }
@@ -220,6 +222,24 @@ export default function SyncPage() {
         {hasMore && !running && (
           <button className="btn btn-primary" onClick={() => runPhase('cards')} disabled={running}>
             ▶ Continue Next Batch
+          </button>
+        )}
+      </div>
+
+      <hr style={{ border: 'none', borderTop: '1px solid var(--surface2)', margin: '20px 0' }} />
+
+      <h2 style={{ fontSize: '1rem', marginBottom: 8 }}>🖼️ Refill Missing Images</h2>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: 14 }}>
+        Re-fetches cards that were saved as stubs without image data. Run this if card images are missing.
+        Runs in batches — click Continue until complete.
+      </p>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+        <button className="btn btn-secondary" onClick={() => runPhase('refill')} disabled={running}>
+          {running ? '⏳ Syncing…' : '🖼️ Refill Images'}
+        </button>
+        {hasRefillMore && !running && (
+          <button className="btn btn-secondary" onClick={() => runPhase('refill')} disabled={running}>
+            ▶ Continue Refill Batch
           </button>
         )}
       </div>
